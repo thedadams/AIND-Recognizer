@@ -30,13 +30,17 @@ class ModelSelector(object):
     def select(self):
         raise NotImplementedError
 
-    def base_model(self, num_states):
+    def base_model(self, num_states, xs=None, lengths=None):
         # with warnings.catch_warnings():
         warnings.filterwarnings("ignore", category=DeprecationWarning)
-        # warnings.filterwarnings("ignore", category=RuntimeWarning)
+        warnings.filterwarnings("ignore", category=RuntimeWarning)
+        if xs is None:
+            xs = self.X
+        if lengths is None:
+            lengths = self.lengths
         try:
             hmm_model = GaussianHMM(n_components=num_states, covariance_type="diag", n_iter=1000,
-                                    random_state=self.random_state, verbose=False).fit(self.X, self.lengths)
+                                    random_state=self.random_state, verbose=False).fit(xs, lengths)
             if self.verbose:
                 print("model created for {} with {} states".format(self.this_word, num_states))
             return hmm_model
@@ -75,8 +79,26 @@ class SelectorBIC(ModelSelector):
         """
         warnings.filterwarnings("ignore", category=DeprecationWarning)
 
-        # TODO implement model selection based on BIC scores
-        raise NotImplementedError
+        best_model = None
+        best_model_score = float("inf")
+        for n in range(self.min_n_components, self.max_n_components + 1):
+            model = None
+            this_score = 0.0
+            try:
+                model = self.base_model(n)
+                if model is None:
+                    break
+                this_score = -2.0 * model.score(self.X, self.lengths) + len(self.X[0]) * np.log(len(self.lengths))
+                if this_score < best_model_score:
+                    best_model_score = this_score
+                    best_model = model
+            except Exception as e:
+                if self.verbose:
+                    print(e)
+                    print("There was a problem splitting the data.")
+            if model is None:
+                break
+        return best_model
 
 
 class SelectorDIC(ModelSelector):
@@ -100,8 +122,48 @@ class SelectorCV(ModelSelector):
 
     '''
 
+    def train_test_data_split(self, train_indexes, test_indexes):
+        train_x = []
+        test_x = []
+        train_l = []
+        test_l = []
+        global_index = 0
+        for index, length in enumerate(self.lengths):
+            if index in train_indexes:
+                for j in range(length):
+                    train_x.append(self.X[global_index + j])
+                train_l.append(length)
+            else:
+                for j in range(length):
+                    test_x.append(self.X[global_index + j])
+                test_l.append(length)
+            global_index += length
+        return train_x, train_l, test_x, test_l
+
+
     def select(self):
         warnings.filterwarnings("ignore", category=DeprecationWarning)
-
-        # TODO implement model selection using CV
-        raise NotImplementedError
+        warnings.filterwarnings("ignore", category=RuntimeWarning)
+        best_model = None
+        best_model_score = float("-inf")
+        split_method = KFold(2)
+        for n in range(self.min_n_components, self.max_n_components + 1):
+            model = None
+            this_score = 0.0
+            try:
+                for cv_train_idx, cv_test_idx in split_method.split(self.sequences):
+                    train_x, train_lengths, test_x, test_lengths = self.train_test_data_split(cv_train_idx, cv_test_idx)
+                    model = self.base_model(n, train_x, train_lengths)
+                    if model is None:
+                        break
+                    this_score += model.score(test_x, test_lengths)
+                if this_score > best_model_score:
+                    best_model_score = this_score
+                    best_model = model
+            except Exception as e:
+                if self.verbose:
+                    print(e)
+                    print("There was a problem splitting the data.")
+            if model is None:
+                break
+        return best_model
