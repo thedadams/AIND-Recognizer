@@ -35,9 +35,8 @@ class ModelSelector(object):
         # with warnings.catch_warnings():
         warnings.filterwarnings("ignore", category=DeprecationWarning)
         warnings.filterwarnings("ignore", category=RuntimeWarning)
-        if xs is None:
+        if xs is None or lengths is None:
             xs = self.X
-        if lengths is None:
             lengths = self.lengths
         try:
             hmm_model = GaussianHMM(n_components=num_states, covariance_type="diag", n_iter=1000,
@@ -89,7 +88,8 @@ class SelectorBIC(ModelSelector):
                 model = self.base_model(n)
                 if model is None:
                     break
-                this_score = -2.0 * model.score(self.X, self.lengths) + len(self.X[0]) * np.log(len(self.lengths))
+                this_score = -2.0 * model.score(self.X, self.lengths) + \
+                    (n * (n - 1) + n * model.n_features) * np.log(len(self.lengths))
                 if this_score < best_model_score:
                     best_model_score = this_score
                     best_model = model
@@ -115,7 +115,28 @@ class SelectorDIC(ModelSelector):
         warnings.filterwarnings("ignore", category=DeprecationWarning)
 
         # TODO implement model selection based on DIC scores
-        raise NotImplementedError
+        best_model = None
+        best_model_score = float("-inf")
+        for n in range(self.min_n_components, self.max_n_components + 1):
+            model = None
+            this_score = 0.0
+            try:
+                model = self.base_model(n)
+                if model is None:
+                    break
+                this_score = sum([model.score(y[0], y[1]) for k, y in self.hwords.items() if k != self.this_word])
+                this_score /= len(self.words) - 1
+                this_score = this_score = model.score(self.X, self.lengths) - this_score
+                if this_score > best_model_score:
+                    best_model_score = this_score
+                    best_model = model
+            except Exception as e:
+                if self.verbose:
+                    print(e)
+                    print("There was a problem splitting the data.")
+            if model is None:
+                break
+        return best_model
 
 
 class SelectorCV(ModelSelector):
@@ -141,7 +162,6 @@ class SelectorCV(ModelSelector):
             global_index += length
         return train_x, train_l, test_x, test_l
 
-
     def select(self):
         warnings.filterwarnings("ignore", category=DeprecationWarning)
         warnings.filterwarnings("ignore", category=RuntimeWarning)
@@ -153,7 +173,8 @@ class SelectorCV(ModelSelector):
             this_score = 0.0
             try:
                 for cv_train_idx, cv_test_idx in split_method.split(self.sequences):
-                    train_x, train_lengths, test_x, test_lengths = self.train_test_data_split(cv_train_idx, cv_test_idx)
+                    train_x, train_lengths, test_x, test_lengths = self.train_test_data_split(
+                        cv_train_idx, cv_test_idx)
                     model = self.base_model(n, train_x, train_lengths)
                     if model is None:
                         break
@@ -165,6 +186,4 @@ class SelectorCV(ModelSelector):
                 if self.verbose:
                     print(e)
                     print("There was a problem splitting the data.")
-            if model is None:
-                break
         return best_model
