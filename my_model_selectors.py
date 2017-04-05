@@ -28,8 +28,51 @@ class ModelSelector(object):
         self.random_state = random_state
         self.verbose = verbose
 
-    def select(self):
-        raise NotImplementedError
+    def select(self, selector_func=None):
+        """For BIC and DIC, we can use this select method by passing the corresponding
+           selector_func.
+
+            params:
+                selector_func - a function with signature func(model) for scoring purposes
+
+            returns:
+                the best model for the selection method
+        """
+        warnings.filterwarnings("ignore", category=DeprecationWarning)
+        warnings.filterwarnings("ignore", category=RuntimeWarning)
+
+        # If selector_func is None, then we assume this is SelectorConstant
+        if selector_func is None:
+            return self.base_model(self.n_constant)
+
+        best_model = None
+        best_model_score = float("-inf")
+        for n in range(self.min_n_components, self.max_n_components + 1):
+            model = None
+            this_score = 0.0
+            try:
+                # Get the base model
+                model = self.base_model(n)
+                # If the model initialization failed because there are too many components
+                # then we stop.
+                if model is None:
+                    break
+                # Get the BIC for this model.
+                this_score = selector_func(model)
+                # If this model is better than the previous best, then we use this model.
+                # Note that I changed the formula so that we are always maximizing.
+                if this_score > best_model_score:
+                    best_model_score = this_score
+                    best_model = model
+            except Exception as e:
+                if self.verbose:
+                    print(e)
+                    print("There was a problem splitting the data.")
+            # If the model initialization failed because there are too many components
+            # then we stop.
+            if model is None:
+                break
+        return best_model
 
     def base_model(self, num_states, xs=None, lengths=None):
         # with warnings.catch_warnings():
@@ -60,8 +103,7 @@ class SelectorConstant(ModelSelector):
 
         :return: GaussianHMM object
         """
-        best_num_components = self.n_constant
-        return self.base_model(best_num_components)
+        return super().select()
 
 
 class SelectorBIC(ModelSelector):
@@ -69,6 +111,8 @@ class SelectorBIC(ModelSelector):
 
     http://www2.imm.dtu.dk/courses/02433/doc/ch6_slides.pdf
     Bayesian information criteria: BIC = -2 * logL + p * logN
+
+    NOTE: I changed the formula to BIC = 2 * logL - p * logN so that we are always maximizing
     """
 
     def select(self):
@@ -77,29 +121,19 @@ class SelectorBIC(ModelSelector):
 
         :return: GaussianHMM object
         """
-        warnings.filterwarnings("ignore", category=DeprecationWarning)
+        # Call the select method for the super class, passing the bic scoring function.
+        return super().select(selector_func=self.bic)
 
-        best_model = None
-        best_model_score = float("inf")
-        for n in range(self.min_n_components, self.max_n_components + 1):
-            model = None
-            this_score = 0.0
-            try:
-                model = self.base_model(n)
-                if model is None:
-                    break
-                this_score = -2.0 * model.score(self.X, self.lengths) + \
-                    (n * (n - 1) + n * model.n_features) * np.log(len(self.lengths))
-                if this_score < best_model_score:
-                    best_model_score = this_score
-                    best_model = model
-            except Exception as e:
-                if self.verbose:
-                    print(e)
-                    print("There was a problem splitting the data.")
-            if model is None:
-                break
-        return best_model
+    def bic(self, model):
+        """The scoring formula for BIC.
+
+        params:
+            model - the model we are testing
+
+        returns:
+            float - the score for this model.
+        """
+        return 2.0 * model.score(self.X, self.lengths) - (model.n_components * (model.n_components - 1) + model.n_components * model.n_features) * np.log(len(self.lengths))
 
 
 class SelectorDIC(ModelSelector):
@@ -110,33 +144,24 @@ class SelectorDIC(ModelSelector):
     http://citeseerx.ist.psu.edu/viewdoc/download?doi=10.1.1.58.6208&rep=rep1&type=pdf
     DIC = log(P(X(i)) - 1/(M-1)SUM(log(P(X(all but i))
     '''
+    # Call the select method for the super class, passing the dic scoring function.
 
     def select(self):
-        warnings.filterwarnings("ignore", category=DeprecationWarning)
+        return super().select(selector_func=self.dic)
 
-        # TODO implement model selection based on DIC scores
-        best_model = None
-        best_model_score = float("-inf")
-        for n in range(self.min_n_components, self.max_n_components + 1):
-            model = None
-            this_score = 0.0
-            try:
-                model = self.base_model(n)
-                if model is None:
-                    break
-                this_score = sum([model.score(y[0], y[1]) for k, y in self.hwords.items() if k != self.this_word])
-                this_score /= len(self.words) - 1
-                this_score = this_score = model.score(self.X, self.lengths) - this_score
-                if this_score > best_model_score:
-                    best_model_score = this_score
-                    best_model = model
-            except Exception as e:
-                if self.verbose:
-                    print(e)
-                    print("There was a problem splitting the data.")
-            if model is None:
-                break
-        return best_model
+    def dic(self, model):
+        """The scoring formula for DIC.
+
+        params:
+            model - the model we are testing
+
+        returns:
+            float - the score for this model.
+        """
+        scores = [model.score(y[0], y[1]) for k, y in self.hwords.items() if k != self.this_word]
+        this_score = sum(scores) / float(len(scores))
+        this_score = model.score(self.X, self.lengths) - this_score
+        return this_score
 
 
 class SelectorCV(ModelSelector):
@@ -145,16 +170,31 @@ class SelectorCV(ModelSelector):
     '''
 
     def train_test_data_split(self, train_indexes, test_indexes):
+        """Given the train and test indexes from the split, this function returns the corresponding
+        Xs and lengths
+
+        param:
+            train_indexes - the indexes for training
+            test_indexes - the indexes for testing
+
+        returns:
+            list - Xs for training
+            list - lengths for training
+            list - Xs for testing
+            list - lengths for training
+        """
         train_x = []
         test_x = []
         train_l = []
         test_l = []
         global_index = 0
         for index, length in enumerate(self.lengths):
+            # If this is a train index, then we add the xs and lengths for training.
             if index in train_indexes:
                 for j in range(length):
                     train_x.append(self.X[global_index + j])
                 train_l.append(length)
+            # Otherwise we add the xs and lengths for training.
             else:
                 for j in range(length):
                     test_x.append(self.X[global_index + j])
